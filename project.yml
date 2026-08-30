@@ -1,0 +1,25 @@
+name: JOEY
+options:
+  bundleIdPrefix: eu.homeisle
+settings:
+  base:
+    IPHONEOS_DEPLOYMENT_TARGET: 17.0
+    SWIFT_VERSION: 5.0
+targets:
+  JOEY:
+    type: application
+    platform: iOS
+    sources:
+      - path: JOEY
+    info:
+      path: JOEY/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: JOEY
+        UILaunchScreen: {}
+        NSBluetoothAlwaysUsageDescription: "JOEY utilise le Bluetooth pour communiquer avec l'analyseur d'eau Joey."
+        NSBluetoothPeripheralUsageDescription: "JOEY utilise le Bluetooth pour communiquer avec l'analyseur d'eau Joey."
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: eu.homeisle.joey
