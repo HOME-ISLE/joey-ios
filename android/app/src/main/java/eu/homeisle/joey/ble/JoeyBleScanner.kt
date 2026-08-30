@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -21,13 +22,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 
-/**
- * BLE diagnostic layer for Joey.
- *
- * V1 deliberately performs READ-ONLY GATT discovery. We do not write to an
- * unknown characteristic until the Joey protocol has been verified on the
- * real unit. This avoids changing calibration/configuration accidentally.
- */
 class JoeyBleScanner(private val context: Context) {
 
     data class Device(
@@ -69,19 +63,34 @@ class JoeyBleScanner(private val context: Context) {
     private val scanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val device = Device(
-                address = result.device.address,
-                name = result.device.name ?: result.scanRecord?.deviceName,
-                rssi = result.rssi,
-                device = result.device
-            )
-            _devices.value = (_devices.value.filterNot { it.address == device.address } + device)
-                .sortedByDescending { it.rssi }
+            addResult(result)
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onBatchScanResults(results: MutableList<ScanResult>) {
+            results.forEach(::addResult)
         }
 
         override fun onScanFailed(errorCode: Int) {
-            _state.value = State.Error("Échec du scan BLE : $errorCode")
+            _state.value = State.Error("Échec du scan BLE : code $errorCode")
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun addResult(result: ScanResult) {
+        val name = try {
+            result.device.name ?: result.scanRecord?.deviceName
+        } catch (_: SecurityException) {
+            result.scanRecord?.deviceName
+        }
+        val device = Device(
+            address = result.device.address,
+            name = name,
+            rssi = result.rssi,
+            device = result.device
+        )
+        _devices.value = (_devices.value.filterNot { it.address == device.address } + device)
+            .sortedByDescending { it.rssi }
     }
 
     fun hasScanPermission(): Boolean =
@@ -92,24 +101,62 @@ class JoeyBleScanner(private val context: Context) {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
 
+    fun bluetoothAvailable(): Boolean = adapter != null
+
+    fun bluetoothEnabled(): Boolean = try {
+        adapter?.isEnabled == true
+    } catch (_: SecurityException) {
+        false
+    }
+
     @SuppressLint("MissingPermission")
     fun startScan() {
         if (!hasScanPermission()) {
-            _state.value = State.Error("Permission Bluetooth requise")
+            _state.value = State.Error("Permission Appareils à proximité refusée")
             return
         }
-        if (adapter?.isEnabled != true) {
+        if (!bluetoothAvailable()) {
+            _state.value = State.Error("Bluetooth non disponible sur ce téléphone")
+            return
+        }
+        if (!bluetoothEnabled()) {
             _state.value = State.Error("Bluetooth désactivé")
             return
         }
+
+        val bleScanner = scanner
+        if (bleScanner == null) {
+            _state.value = State.Error("Scanner Bluetooth LE indisponible")
+            return
+        }
+
         _devices.value = emptyList()
+        _gattValues.value = emptyList()
         _state.value = State.Scanning
-        scanner?.startScan(scanCallback)
+
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setReportDelay(0)
+            .build()
+
+        try {
+            bleScanner.stopScan(scanCallback)
+            bleScanner.startScan(null, settings, scanCallback)
+        } catch (e: SecurityException) {
+            _state.value = State.Error("Autorisation Bluetooth manquante : ${e.message ?: "accès refusé"}")
+        } catch (e: IllegalStateException) {
+            _state.value = State.Error("Bluetooth indisponible : ${e.message ?: "état invalide"}")
+        } catch (e: Exception) {
+            _state.value = State.Error("Impossible de démarrer le scan : ${e.javaClass.simpleName}")
+        }
     }
 
     @SuppressLint("MissingPermission")
     fun stopScan() {
-        if (hasScanPermission()) scanner?.stopScan(scanCallback)
+        try {
+            if (hasScanPermission()) scanner?.stopScan(scanCallback)
+        } catch (_: Exception) {
+        }
         if (_state.value is State.Scanning) _state.value = State.Idle
     }
 
@@ -121,14 +168,21 @@ class JoeyBleScanner(private val context: Context) {
         }
         stopScan()
         _state.value = State.Connecting(device.name ?: device.address)
-        gatt?.close()
-        gatt = device.device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        try {
+            gatt?.close()
+            gatt = device.device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        } catch (e: Exception) {
+            _state.value = State.Error("Connexion GATT impossible : ${e.javaClass.simpleName}")
+        }
     }
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
-        gatt?.disconnect()
-        gatt?.close()
+        try {
+            gatt?.disconnect()
+            gatt?.close()
+        } catch (_: Exception) {
+        }
         gatt = null
         _state.value = State.Idle
     }
@@ -136,6 +190,10 @@ class JoeyBleScanner(private val context: Context) {
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS && newState != android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
+                _state.value = State.Error("Erreur GATT : statut $status")
+                return
+            }
             when (newState) {
                 android.bluetooth.BluetoothProfile.STATE_CONNECTED -> {
                     _state.value = State.Connected(gatt.device.name ?: gatt.device.address)
@@ -147,7 +205,10 @@ class JoeyBleScanner(private val context: Context) {
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                _state.value = State.Error("Découverte des services GATT impossible : $status")
+                return
+            }
             readNextReadableCharacteristic(gatt.services, 0, 0)
         }
 
