@@ -26,7 +26,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -47,17 +49,27 @@ fun JoeyApp() {
     val state by scanner.state.collectAsState()
     val devices by scanner.devices.collectAsState()
     val gattValues by scanner.gattValues.collectAsState()
+    var diagnostic by remember { mutableStateOf("V3 GATT — prêt") }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        if (result.values.all { it }) scanner.startScan()
+        val scanOk = result[Manifest.permission.BLUETOOTH_SCAN] == true
+        val connectOk = result[Manifest.permission.BLUETOOTH_CONNECT] == true
+        if (scanOk && connectOk) {
+            diagnostic = "Autorisations accordées — lancement du scan"
+            scanner.startScan()
+        } else {
+            diagnostic = "Bluetooth refusé : activez Appareils à proximité dans Paramètres > Applications > JOEY > Autorisations"
+        }
     }
 
     fun startBleScan() {
+        diagnostic = "Bouton reçu — vérification Bluetooth…"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             (!scanner.hasScanPermission() || !scanner.hasConnectPermission())
         ) {
+            diagnostic = "Demande d’autorisation Bluetooth…"
             permissionLauncher.launch(
                 arrayOf(
                     Manifest.permission.BLUETOOTH_SCAN,
@@ -65,6 +77,7 @@ fun JoeyApp() {
                 )
             )
         } else {
+            diagnostic = "Autorisations OK — scan BLE lancé"
             scanner.startScan()
         }
     }
@@ -79,6 +92,7 @@ fun JoeyApp() {
                     state = state,
                     devices = devices,
                     gattValues = gattValues,
+                    diagnostic = diagnostic,
                     onScan = ::startBleScan
                 )
             }
@@ -93,6 +107,7 @@ private fun JoeyDashboard(
     state: JoeyBleScanner.State,
     devices: List<JoeyBleScanner.Device>,
     gattValues: List<JoeyBleScanner.GattValue>,
+    diagnostic: String,
     onScan: () -> Unit
 ) {
     LazyColumn(
@@ -102,6 +117,7 @@ private fun JoeyDashboard(
         item {
             Text("JOEY", style = if (unfolded) MaterialTheme.typography.displaySmall else MaterialTheme.typography.headlineLarge)
             Text("Mon Spa", style = MaterialTheme.typography.headlineMedium)
+            Text("V3 GATT", style = MaterialTheme.typography.labelLarge)
         }
 
         item {
@@ -123,6 +139,7 @@ private fun JoeyDashboard(
         item {
             Text("Connexion GATT", style = MaterialTheme.typography.titleLarge)
             Text(stateLabel(state), style = MaterialTheme.typography.bodyLarge)
+            Text(diagnostic, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(8.dp))
             Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) {
                 Text(if (state is JoeyBleScanner.State.Scanning) "Recherche en cours…" else "Rechercher le Joey")
